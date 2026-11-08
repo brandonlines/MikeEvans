@@ -1,0 +1,33 @@
+# macOS metadata
+.DS_Store
+._*
+
+# Python bytecode & environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Model binaries (setup script downloads face_landmarker.task automatically if missing)
+face_landmarker.task
+
+# Temporary diagnostic crops & outputs
+*.png.tmp
+flap_*.png
+mouth*.png
+glabella_*.png
+test_*.png
+test*.png
+zone.png
+upper.png
+cavity_crop.png
+pink_zoom.png
+latest_mouth.png
+glasses_crop.png
+orig_neck.png
+orig_older_mouth.png
+head_crop.png
+glasses_in_im0.png
