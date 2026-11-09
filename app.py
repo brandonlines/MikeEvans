@@ -22,6 +22,7 @@ OPERATOR = "Mike Evans Layered - Operator"  # Status and prompts, seen only by t
 OPERATOR_WIDTH = 480
 OPERATOR_INTERVAL = 0.1
 NO_FACE_HOLD = 1.0  # Seconds to hold the last pose before easing back to neutral.
+FRAME_WAIT = 0.03   # Longest sleep between key checks while no new camera frame arrives.
 
 audio_rms = 0.0
 def audio_callback(indata, frames, time_info, status):
@@ -132,6 +133,8 @@ def main():
     calibration = []
     output = portrait
     shown = None
+    shown_stamp = 0.0
+    total_delay = 0.0
     paused = False
     live_mouth = not args.no_live_mouth
     next_calibration = time.monotonic() + 3.0
@@ -197,6 +200,9 @@ def main():
                 if output is not shown:
                     cv2.imshow(WINDOW, output)
                     shown = output
+                    if shown_stamp:
+                        total_delay += time.monotonic() - shown_stamp
+                        shown_stamp = 0.0
                 if now >= next_operator:
                     next_operator = now + OPERATOR_INTERVAL
                     view = cv2.resize(output, operator_size, interpolation=cv2.INTER_AREA)
@@ -230,7 +236,8 @@ def main():
 
                 sequence, stamp, frame = feed.latest()
                 if paused or now < next_calibration or frame is None or sequence == last_sequence:
-                    time.sleep(0.003)
+                    # waitKey above already costs ~11 ms on macOS; sleep only until a frame lands.
+                    feed.wait(sequence, FRAME_WAIT)
                     continue
 
                 last_sequence = sequence
@@ -284,6 +291,7 @@ def main():
                             render_count = 0
                             total_track = 0.0
                             total_render = 0.0
+                            total_delay = 0.0
                             capture_baseline = sequence
                         continue
 
@@ -292,6 +300,7 @@ def main():
                     t_finished = time.perf_counter()
 
                     render_count += 1
+                    shown_stamp = stamp
                     total_track += (t_tracked - t_track_start)
                     total_render += (t_finished - t_render_start)
 
@@ -301,11 +310,14 @@ def main():
                         cam_fps = (sequence - capture_baseline) / dt_span if capture_baseline else render_fps
                         avg_track_ms = 1000.0 * total_track / max(1, render_count)
                         avg_render_ms = 1000.0 * total_render / max(1, render_count)
-                        print(f'Render {render_fps:.1f} FPS | Camera {cam_fps:.1f} FPS | Track {avg_track_ms:.1f}ms | Warp {avg_render_ms:.1f}ms', flush=True)
+                        delay_ms = 1000.0 * total_delay / max(1, render_count)
+                        print(f'Render {render_fps:.1f} FPS | Camera {cam_fps:.1f} FPS | Track {avg_track_ms:.1f}ms | '
+                              f'Warp {avg_render_ms:.1f}ms | Delay {delay_ms:.0f}ms', flush=True)
                         report = now
                         render_count = 0
                         total_track = 0.0
                         total_render = 0.0
+                        total_delay = 0.0
                         capture_baseline = sequence
                 except Exception as exc:  # One bad frame must never take the feed down.
                     if now - last_fault >= 5.0:

@@ -38,6 +38,16 @@ If your face leaves the frame, the avatar holds its last pose and eases back to
 neutral after a second. If the camera drops out, the picture holds while the app
 reconnects, and the Operator window tells you.
 
+## Lip sync
+Your voice reaches Zoom directly, but the picture passes through the camera, this app
+and OBS first, so the lips trail the voice slightly. The app prints its own share
+every five seconds in the Terminal window as `Delay`, normally 20 to 40 ms. If
+`Render` falls well below `Camera` or `Delay` climbs, close other heavy apps.
+
+If the lag is still visible in a rehearsal, the only full fix is to delay the mic to
+match: route it through OBS with a Sync Offset (Advanced Audio Properties) and send
+OBS's audio to Zoom through a virtual audio device. This app cannot delay the mic.
+
 ## Changing the photos
 Replace `assets/source/cutout.webp` (the person on transparency) and
 `assets/source/scene.webp` (same framing, in the room). They must be pixel-aligned.

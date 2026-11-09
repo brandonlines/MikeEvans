@@ -55,19 +55,15 @@ class BodyMotion:
         P = cv2.getPerspectiveTransform(self.src_quad, dst_quad)
 
         # Hair clipping guard (unchanged)
-        ys, xs = np.where(head_alpha > 0.2)
-        if len(xs):
-            top_pts = np.array([[[float(xs.min()), float(ys.min())], [float(xs.max()), float(ys.min())]]], dtype=np.float32)
+        x, y, w, h = cv2.boundingRect((head_alpha > 0.2).view(np.uint8))
+        if w:
+            top_pts = np.array([[[x, y], [x + w - 1, y]]], dtype=np.float32)
             top_proj = cv2.perspectiveTransform(top_pts, P)[0, :, 1].min()
             if top_proj < 4.0 * self.s:
                 P[1, 2] += (4.0 * self.s - top_proj)
 
-        alpha = np.maximum(self.torso, head_alpha)
-        premult = image.astype(np.float32) * alpha[:, :, None]
-
         # Replicate the border so the jacket stays solid along the bottom edge of the frame.
-        color = cv2.warpPerspective(premult, P, (self.w, self.h), borderMode=cv2.BORDER_REPLICATE)
-        mask = cv2.warpPerspective(alpha, P, (self.w, self.h), borderMode=cv2.BORDER_REPLICATE)[:, :, None]
-
-        out = color + self.clean.astype(np.float32) * (1.0 - mask)
-        return np.clip(out, 0, 255).astype(np.uint8)
+        alpha = np.maximum(self.torso, head_alpha)
+        color = cv2.warpPerspective(image, P, (self.w, self.h), borderMode=cv2.BORDER_REPLICATE)
+        mask = cv2.warpPerspective(alpha, P, (self.w, self.h), borderMode=cv2.BORDER_REPLICATE)
+        return cv2.blendLinear(color, self.clean, mask, 1.0 - mask)

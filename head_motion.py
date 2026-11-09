@@ -5,6 +5,16 @@ import time
 from layers import jaw_boundary
 from puppet import canonical, rig_scale
 
+# Rigid spans that set the apparent face size: across the eyes, and forehead to nose base.
+# A head turn shortens one and a nod the other; only moving toward the camera grows both.
+SIZE_SPANS = ([33, 10], [263, 2])
+FIELD_STEP = 2  # The warp field is smooth, so it is solved on a coarser grid and upsampled.
+
+
+def face_size(points):
+    return np.linalg.norm(points[SIZE_SPANS[0]] - points[SIZE_SPANS[1]], axis=1)
+
+
 class HeadMotion:
     def __init__(self, image, points, alpha, background):
         self.image = image
@@ -20,9 +30,15 @@ class HeadMotion:
         self.y0 = max(0, int(ys.min()) - pad)
         self.x1 = min(w, int(xs.max()) + pad + 1)
         self.y1 = min(h, int(ys.max()) + pad + 1)
-        yy, xx = np.mgrid[self.y0:self.y1, self.x0:self.x1].astype(np.float32)
-        self.xx = xx
-        self.yy = yy
+        rw, rh = self.x1 - self.x0, self.y1 - self.y0
+        self.size = (rw, rh)
+        self.background_roi = np.ascontiguousarray(self.background[self.y0:self.y1, self.x0:self.x1])
+
+        # Coarse grid whose samples sit where cv2.resize expects them when scaling back up.
+        gw, gh = -(-rw // FIELD_STEP), -(-rh // FIELD_STEP)
+        gx = self.x0 + (np.arange(gw, dtype=np.float32) + 0.5) * (rw / gw) - 0.5
+        gy = self.y0 + (np.arange(gh, dtype=np.float32) + 0.5) * (rh / gh) - 0.5
+        self.xx, self.yy = np.meshgrid(gx, gy)
 
         # Head ellipsoid, placed from the face (proportions in eye-spans).
         eyes = (points[33] + points[263]) / 2.0
@@ -40,11 +56,12 @@ class HeadMotion:
         self.mobility = np.where(dy <= 0, 1.0, (1.0 - t_mob**2)**2).astype(np.float32)
 
         # Depth surface normals for directional relighting
-        Z = self.depth(self.xx, self.yy)
+        yy, xx = np.mgrid[self.y0:self.y1, self.x0:self.x1].astype(np.float32)
+        Z = self.depth(xx, yy)
         dzdx = cv2.Sobel(Z, cv2.CV_32F, 1, 0, ksize=3)
         dzdy = cv2.Sobel(Z, cv2.CV_32F, 0, 1, ksize=3)
         norm = np.sqrt(dzdx**2 + dzdy**2 + 1.0)
-        self.normals = np.stack([-dzdx / norm, -dzdy / norm, 1.0 / norm], axis=2)
+        self.normals = [-dzdx / norm, -dzdy / norm, 1.0 / norm]
         self.light_dir = np.array([-0.2, -0.7, 0.6], dtype=np.float32)
         self.light_dir /= np.linalg.norm(self.light_dir)
 
@@ -54,7 +71,6 @@ class HeadMotion:
     def reset(self):
         self.state = np.zeros(6, np.float32)   # [pitch, yaw, roll, tx, ty, lean]
         self.last = time.monotonic()
-        self.start_time = time.monotonic()
 
     @staticmethod
     def pose(points):
@@ -88,7 +104,7 @@ class HeadMotion:
         roll = np.arctan2(basis[0, 1], basis[0, 0]) - np.arctan2(base_basis[0, 1], base_basis[0, 0])
         angles[2] = np.arctan2(np.sin(roll), np.cos(roll)) * 1.25
 
-        lean = d / bd - 1.0
+        lean = float(np.max(face_size(current) / face_size(neutral))) - 1.0
         lean = np.sign(lean) * max(0.0, abs(lean) - 0.015)
 
         desired = np.r_[np.clip(angles, [-0.075, -0.12, -0.12], [0.075, 0.12, 0.12]),
@@ -122,25 +138,21 @@ class HeadMotion:
             sx = inv[0, 0] * a + inv[0, 1] * b + self.cx
             sy = inv[1, 0] * a + inv[1, 1] * b + self.cy
 
-        sx = (xe + (sx - xe) * self.mobility).astype(np.float32)
-        sy = (ye + (sy - ye) * self.mobility).astype(np.float32)
+        sx = cv2.resize(xe + (sx - xe) * self.mobility, self.size, interpolation=cv2.INTER_LINEAR)
+        sy = cv2.resize(ye + (sy - ye) * self.mobility, self.size, interpolation=cv2.INTER_LINEAR)
 
-        color = cv2.remap(image, sx, sy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101).astype(np.float32)
-
-        pulse = np.sin((now - self.start_time) * 2.0 * np.pi * 1.0) * 1.8
-        color[:, :, 2] = np.clip(color[:, :, 2] + pulse, 0, 255)
-
-        rot_light = R.T @ self.light_dir
-        diffuse = np.sum(self.normals * rot_light, axis=2)
-        intensity = np.clip(1.0 + (diffuse - 0.5) * 0.28, 0.86, 1.14)
-        color = np.clip(color * intensity[:, :, None], 0, 255)
-
+        color = cv2.remap(image, sx, sy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
         alpha = cv2.remap(self.alpha, sx, sy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+
+        light = R.T @ self.light_dir
+        nx, ny, nz = self.normals
+        diffuse = nx * light[0] + ny * light[1] + nz * light[2]
+        intensity = np.clip(1.0 + (diffuse - 0.5) * 0.28, 0.86, 1.14)
+        color = cv2.multiply(color, cv2.merge([intensity] * 3), dtype=cv2.CV_8U)
+
         self.last_alpha = np.zeros_like(self.background[:, :, 0], dtype=np.float32)
         self.last_alpha[self.y0:self.y1, self.x0:self.x1] = alpha
 
         out = self.background.copy()
-        roi = out[self.y0:self.y1, self.x0:self.x1].astype(np.float32)
-        roi = np.clip(color * alpha[:, :, None] + roi * (1.0 - alpha[:, :, None]), 0, 255).astype(np.uint8)
-        out[self.y0:self.y1, self.x0:self.x1] = roi
+        out[self.y0:self.y1, self.x0:self.x1] = cv2.blendLinear(color, self.background_roi, alpha, 1.0 - alpha)
         return out

@@ -10,7 +10,7 @@ class LatestFrame:
     def __init__(self, open_camera):
         self.open_camera = open_camera
         self.capture = open_camera()
-        self.lock = threading.Lock()
+        self.lock = threading.Condition()
         self.stop = threading.Event()
         self.frame = None
         self.sequence = 0
@@ -51,6 +51,7 @@ class LatestFrame:
                         self.frame = frame
                         self.sequence += 1
                         self.timestamp = now
+                        self.lock.notify_all()
                     continue
                 if now - last_frame >= REOPEN_AFTER:
                     if self.problem is None:
@@ -65,6 +66,11 @@ class LatestFrame:
     def latest(self):
         with self.lock:
             return self.sequence, self.timestamp, self.frame
+
+    def wait(self, seen, timeout):
+        """Block until a frame newer than `seen` arrives, or `timeout` seconds pass."""
+        with self.lock:
+            self.lock.wait_for(lambda: self.sequence != seen, timeout)
 
     def close(self):
         self.stop.set()

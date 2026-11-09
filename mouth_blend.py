@@ -5,6 +5,7 @@ import numpy as np
 # Inner oral aperture boundary and lateral corners
 INNER_LIPS = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191]
 ALIGN_PTS = [61, 291] + INNER_LIPS
+MARGIN = 12  # Pixels around the aperture: covers the feather and the skin-sampling ring.
 
 class MouthBlender:
     def __init__(self):
@@ -38,16 +39,25 @@ class MouthBlender:
         else:
             self.smooth_matrix = 0.70 * matrix + 0.30 * self.smooth_matrix
 
-        warped_cam = cv2.warpAffine(webcam_frame, self.smooth_matrix, (w_out, h_out), borderMode=cv2.BORDER_REFLECT_101)
+        # Work only in the box around the mouth; everything outside it is left untouched.
+        dst_inner = np.round(target_landmarks[INNER_LIPS]).astype(np.int32)
+        x0, y0 = np.maximum(dst_inner.min(axis=0) - MARGIN, 0)
+        x1, y1 = np.minimum(dst_inner.max(axis=0) + MARGIN + 1, [w_out, h_out])
+        if x1 <= x0 or y1 <= y0:
+            return output_image
+        local = self.smooth_matrix.copy()
+        local[:, 2] -= [x0, y0]
+        size = (int(x1 - x0), int(y1 - y0))
+        warped_cam = cv2.warpAffine(webcam_frame, local, size, borderMode=cv2.BORDER_REFLECT_101)
+        region = output_image[y0:y1, x0:x1]
 
         # Build clean aperture mask to replace the stretched 2D mesh texture
-        dst_inner = target_landmarks[INNER_LIPS].astype(np.float32)
-        mask = np.zeros((h_out, w_out), dtype=np.uint8)
-        cv2.fillPoly(mask, [np.round(dst_inner).astype(np.int32)], 255)
-        
+        mask = np.zeros(size[::-1], dtype=np.uint8)
+        cv2.fillPoly(mask, [dst_inner - [x0, y0]], 255)
+
         # Crisp 2px edge feathering so lips cleanly frame the oral cavity
         mask = cv2.GaussianBlur(mask, (5, 5), 0)
-        
+
         # Smooth ramp from 2.0px to 4.0px opening
         fade_weight = float(np.clip((opening - 2.0) / 2.0, 0.0, 1.0))
         alpha = (mask.astype(np.float32) / 255.0 * fade_weight)[:, :, None]
@@ -56,11 +66,13 @@ class MouthBlender:
         outer_sample = (mask == 0) & (cv2.dilate(mask, np.ones((9, 9), np.uint8)) > 0)
         if outer_sample.sum() > 30:
             cam_skin = np.median(warped_cam[outer_sample], axis=0)
-            target_skin = np.median(output_image[outer_sample], axis=0)
+            target_skin = np.median(region[outer_sample], axis=0)
             # Gentle color tint adjustment without boosting cavity luminance
             tint = np.clip((target_skin - cam_skin) * 0.45, -20, 20)
             warped_cam = np.clip(warped_cam.astype(np.float32) + tint, 0, 255).astype(np.uint8)
 
         # Composite live cavity over the stretched mesh
-        blended = output_image.astype(np.float32) * (1.0 - alpha) + warped_cam.astype(np.float32) * alpha
-        return np.clip(blended, 0, 255).astype(np.uint8)
+        blended = region.astype(np.float32) * (1.0 - alpha) + warped_cam.astype(np.float32) * alpha
+        result = output_image.copy()
+        result[y0:y1, x0:x1] = np.clip(blended, 0, 255).astype(np.uint8)
+        return result
