@@ -11,7 +11,9 @@ BROWS_UPPER_L = [296, 334, 293, 300]
 BROWS_FRAME_LOCK = [107, 55, 65, 52, 53, 46, 336, 285, 295, 282, 283, 276]
 BROWS = sorted(set(BROWS_UPPER_R + BROWS_UPPER_L + BROWS_FRAME_LOCK))
 
-FRAME_ANCHORS = [168, 6, 197, 195, 5, 4, 1, 2, 8, 9, 151, 111, 116, 226, 340, 345, 446, 127, 356]
+FRAME_ANCHORS = [168, 6, 197, 195, 5, 4, 1, 2, 8, 9, 151, 111, 116, 226, 340, 345, 446, 127, 356,
+                 # Eyelid creases: keep blinks below the top rim of the glasses in the photo.
+                 247, 30, 29, 27, 28, 56, 190, 467, 260, 259, 257, 258, 286, 414]
 
 LIPS_OUTER_UPPER = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291]
 LIPS_INNER_UPPER = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308]
@@ -20,6 +22,8 @@ LIPS_INNER_LOWER = [95, 88, 178, 87, 14, 317, 402, 318, 324]
 LIPS = sorted(set(LIPS_OUTER_UPPER + LIPS_INNER_UPPER + LIPS_OUTER_LOWER + LIPS_INNER_LOWER + [78, 308]))
 
 IDS = np.array(sorted(set(OVAL + EYES + BROWS + LIPS + FRAME_ANCHORS + [50, 280, 205, 425, 101, 330])), dtype=int)
+
+RIG_EYE_SPAN = 115.2  # Eye span in pixels that the rig's pixel constants were tuned at.
 
 
 def canonical(points):
@@ -35,6 +39,18 @@ def canonical(points):
     basis = np.array([axis, [-axis[1], axis[0]]], dtype=np.float32)
     center = (left + right) / 2
     return ((points - center) @ basis.T) / distance, center, basis, distance
+
+
+def rig_scale(points):
+    """Multiplier for the rig's pixel constants, so they follow the face rather than the frame."""
+    return canonical(points)[3] / RIG_EYE_SPAN
+
+
+def open_jaw(landmarks, amount):
+    """Copy of `landmarks` with the lower lip dropped by `amount` eye-spans."""
+    opened = np.array(landmarks, dtype=np.float32)
+    opened[LIPS_INNER_LOWER + LIPS_OUTER_LOWER, 1] += amount * canonical(landmarks)[3]
+    return opened
 
 
 class PhotoPuppet:

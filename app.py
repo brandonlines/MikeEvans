@@ -9,15 +9,19 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-from puppet import PhotoPuppet
+from puppet import PhotoPuppet, open_jaw
 from head_motion import HeadMotion
 from body_motion import BodyMotion
-from layers import prepare_layers, overlay
+from layers import prepare_layers
 from mouth_blend import MouthBlender
 from camera_feed import LatestFrame
 
 ROOT = Path(__file__).resolve().parent
-WINDOW = "Mike Evans Layered - Live"
+WINDOW = "Mike Evans Layered - Live"        # Clean program feed for OBS: never draw on this.
+OPERATOR = "Mike Evans Layered - Operator"  # Status and prompts, seen only by the operator.
+OPERATOR_WIDTH = 480
+OPERATOR_INTERVAL = 0.1
+NO_FACE_HOLD = 1.0  # Seconds to hold the last pose before easing back to neutral.
 
 audio_rms = 0.0
 def audio_callback(indata, frames, time_info, status):
@@ -26,6 +30,10 @@ def audio_callback(indata, frames, time_info, status):
         return
     rms = np.sqrt(np.mean(indata**2))
     audio_rms = 0.8 * audio_rms + 0.2 * float(rms)
+
+def audio_jaw(rms):
+    """Jaw opening, in eye-spans, to show for a mic level while no face is visible."""
+    return float(np.clip((rms - 0.02) / 0.08, 0.0, 1.0)) * 0.10
 
 def make_tracker(video=False):
     options = vision.FaceLandmarkerOptions(
@@ -58,16 +66,27 @@ def load_portrait(width):
         raise RuntimeError('Could not detect portrait landmarks.')
     return image, points
 
+def open_camera(index):
+    backend = cv2.CAP_AVFOUNDATION if sys.platform == 'darwin' else cv2.CAP_ANY
+    camera = cv2.VideoCapture(index, backend)
+    if not camera.isOpened():
+        camera.release()
+        raise RuntimeError('Cannot open webcam. Check camera permissions.')
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    camera.set(cv2.CAP_PROP_FPS, 30)
+    return camera
+
 def draw_hud(image, text, progress=None):
     h, w = image.shape[:2]
-    banner_h = 44
+    banner_h = 36
     overlay_img = image.copy()
     cv2.rectangle(overlay_img, (0, h - banner_h), (w, h), (18, 18, 22), -1)
     if progress is not None:
         pw = int(w * np.clip(progress, 0.0, 1.0))
         cv2.rectangle(overlay_img, (0, h - 3), (pw, h), (0, 180, 255), -1)
     cv2.addWeighted(overlay_img, 0.85, image, 0.15, 0, image)
-    cv2.putText(image, text, (20, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (235, 235, 240), 1, cv2.LINE_AA)
+    cv2.putText(image, text, (14, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (235, 235, 240), 1, cv2.LINE_AA)
 
 def main():
     global audio_rms
@@ -80,22 +99,19 @@ def main():
     parser.add_argument('--head-motion', type=float, default=1.0)
     parser.add_argument('--no-live-mouth', action='store_true')
     parser.add_argument('--check', action='store_true')
-    parser.add_argument('--no-glasses', action='store_true', help='Hide the separate frame overlay for comparison')
     args = parser.parse_args()
 
     cv2.setNumThreads(2)
     portrait, points = load_portrait(args.width)
-    portrait, alpha, background, glasses, points = prepare_layers(ROOT, portrait, points, make_tracker, detect)
-    
-    if args.no_glasses:
-        glasses = np.zeros_like(glasses)
+    portrait, alpha, background, points = prepare_layers(ROOT, portrait, points, make_tracker, detect)
+
     puppet = PhotoPuppet(portrait, points)
     head = HeadMotion(portrait, points, alpha, background)
-    body = BodyMotion(ROOT, background)
+    body = BodyMotion(ROOT, background, points)
     mouth = MouthBlender()
 
     if args.check:
-        preview = head.render(overlay(puppet.render(points), glasses), points, points)
+        preview = head.render(puppet.render(points), points, points)
         preview = body.render(preview, head.last_alpha, head.state, args.body_motion)
         if preview.shape != portrait.shape or not np.isfinite(preview).all():
             raise RuntimeError('Portrait renderer check failed')
@@ -111,22 +127,16 @@ def main():
     except Exception as exc:
         print(f'Audio monitoring unavailable ({exc}); continuing video-only.', flush=True)
 
-    backend = cv2.CAP_AVFOUNDATION if sys.platform == 'darwin' else cv2.CAP_ANY
-    camera = cv2.VideoCapture(args.camera, backend)
-    if not camera.isOpened():
-        camera.release()
-        raise RuntimeError('Cannot open webcam. Check camera permissions.')
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    camera.set(cv2.CAP_PROP_FPS, 30)
-
-    feed = LatestFrame(camera).start()
+    feed = LatestFrame(lambda: open_camera(args.camera)).start()
     neutral = None
     calibration = []
-    output = overlay(portrait, glasses)
+    output = portrait
+    shown = None
     paused = False
     live_mouth = not args.no_live_mouth
     next_calibration = time.monotonic() + 3.0
+    next_operator = 0.0
+    operator_size = (OPERATOR_WIDTH, round(portrait.shape[0] * OPERATOR_WIDTH / portrait.shape[1]))
 
     last_sequence = 0
     last_stamp = 0
@@ -135,6 +145,8 @@ def main():
     total_render = 0.0
     report = time.monotonic()
     last_good = report
+    last_pose = None
+    last_fault = 0.0
     capture_baseline = 0
 
     expression_session = None
@@ -145,33 +157,56 @@ def main():
         "Close eyes gently and hold"
     ]
 
+    def compose(pose, webcam=None):
+        target = puppet.target(pose, neutral, args.strength, args.brow_strength)
+        result = puppet.render(target)
+        if webcam is not None:
+            result = mouth.render(result, webcam, pose, target)
+        result = head.render(result, pose, neutral, args.head_motion)
+        return body.render(result, head.last_alpha, head.state, args.body_motion)
+
+    def status(now):
+        if paused:
+            return "PAUSED - feed is frozen (P to resume)", None
+        if feed.problem:
+            return "CAMERA LOST - holding picture, reconnecting...", None
+        if expression_session is not None:
+            step = expression_session['step']
+            return f"Calibration ({step + 1}/4): {prompts[step]}", (now - expression_session['start']) / 3.0
+        if now < next_calibration:
+            return "CALIBRATING: Look straight ahead, mouth closed...", 1.0 - (next_calibration - now) / 3.0
+        if neutral is None:
+            return "Sampling neutral pose...", None
+        if now - last_good > 0.5:
+            return "NO FACE - holding pose", None
+        return "LIVE   R recenter  C calibrate  M mouth  P freeze  Q quit", None
+
     print('Mike Evans V11.1 Fresh — neck repair included.', flush=True)
-    print('Click output: R neutral | C expression calibration | M live mouth | P freeze | Q quit.', flush=True)
+    print('Click either window: R neutral | C expression calibration | M live mouth | P freeze | Q quit.', flush=True)
+    print(f'OBS: capture only "{WINDOW}". Prompts appear in "{OPERATOR}".', flush=True)
 
     try:
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WINDOW, portrait.shape[1], portrait.shape[0])
+        cv2.moveWindow(WINDOW, 0, 40)
+        cv2.namedWindow(OPERATOR, cv2.WINDOW_AUTOSIZE)
+        cv2.moveWindow(OPERATOR, portrait.shape[1] + 10, 40)
         with make_tracker(video=True) as tracker:
             while True:
-                display_frame = output.copy()
-
                 now = time.monotonic()
-                if paused:
-                    draw_hud(display_frame, "PAUSED (press P to resume)")
-                elif expression_session is not None:
-                    step = expression_session['step']
-                    elapsed = now - expression_session['start']
-                    prog = elapsed / 3.0
-                    draw_hud(display_frame, f"Calibration ({step + 1}/4): {prompts[step]}", prog)
-                elif now < next_calibration:
-                    prog = 1.0 - (next_calibration - now) / 3.0
-                    draw_hud(display_frame, "CALIBRATING: Look straight ahead, mouth closed...", prog)
-                elif neutral is None:
-                    draw_hud(display_frame, "Sampling neutral pose...")
+                if output is not shown:
+                    cv2.imshow(WINDOW, output)
+                    shown = output
+                if now >= next_operator:
+                    next_operator = now + OPERATOR_INTERVAL
+                    view = cv2.resize(output, operator_size, interpolation=cv2.INTER_AREA)
+                    draw_hud(view, *status(now))
+                    cv2.imshow(OPERATOR, view)
 
-                cv2.imshow(WINDOW, display_frame)
                 key = cv2.waitKey(1) & 0xFF
-                if key in (ord('q'), 27) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                # OpenCV windows on macOS cannot be closed by the user, and report 0 when minimized.
+                window_closed = sys.platform != 'darwin' and cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1
+                if key in (ord('q'), 27) or window_closed:
                     break
                 if key == ord('c'):
                     expression_session = {'step': 0, 'start': time.monotonic(), 'samples': [], 'poses': []}
@@ -193,9 +228,6 @@ def main():
                 if key == ord('p'):
                     paused = not paused
 
-                if feed.error:
-                    raise RuntimeError(feed.error)
-
                 sequence, stamp, frame = feed.latest()
                 if paused or now < next_calibration or frame is None or sequence == last_sequence:
                     time.sleep(0.003)
@@ -205,83 +237,80 @@ def main():
                 timestamp = max(last_stamp + 1, int(stamp * 1000))
                 last_stamp = timestamp
 
-                t_track_start = time.perf_counter()
-                current = detect(tracker, frame, timestamp)
-                t_tracked = time.perf_counter()
+                try:
+                    t_track_start = time.perf_counter()
+                    current = detect(tracker, frame, timestamp)
+                    t_tracked = time.perf_counter()
 
-                if current is None:
-                    if audio_rms > 0.02 and neutral is not None:
-                        target = neutral.copy()
-                        target[152, 1] += audio_rms * puppet.scale * 30.0
-                        output = puppet.render(target)
-                        output = overlay(output, glasses)
-                    elif now - last_good > 1.0:
-                        output = overlay(portrait, glasses)
-                    continue
-
-                last_good = now
-
-                if expression_session is not None:
-                    session = expression_session
-                    elapsed = now - session['start']
-                    if elapsed >= 1.5:
-                        session['samples'].append(current.copy())
-                    if elapsed >= 3.0 and len(session['samples']) >= 8:
-                        session['poses'].append(np.median(session['samples'], axis=0).astype(np.float32))
-                        session['step'] += 1
-                        session['start'] = now
-                        session['samples'] = []
-                        if session['step'] == 4:
-                            neutral = session['poses'][0]
-                            puppet.expression.calibrate(*session['poses'])
-                            puppet.smoothed = None
-                            head.reset()
+                    if current is None:
+                        if neutral is not None and expression_session is None:
                             mouth.reset()
-                            body.reset()
-                            expression_session = None
-                            print('Expression calibration complete. Speak naturally.', flush=True)
-                        else:
-                            print(f'Expression calibration: {prompts[session["step"]]} (3 seconds)', flush=True)
-                    continue
+                            held = last_pose if last_pose is not None and now - last_good <= NO_FACE_HOLD else neutral
+                            output = compose(open_jaw(held, audio_jaw(audio_rms)))
+                        continue
 
-                if neutral is None:
-                    calibration.append(current)
-                    if len(calibration) >= 12:
-                        neutral = np.median(calibration, axis=0).astype(np.float32)
-                        print('Calibrated. Speak naturally.', flush=True)
-                        report = time.monotonic()
+                    last_good = now
+                    last_pose = current
+
+                    if expression_session is not None:
+                        session = expression_session
+                        elapsed = now - session['start']
+                        if elapsed >= 1.5:
+                            session['samples'].append(current.copy())
+                        if elapsed >= 3.0 and len(session['samples']) >= 8:
+                            session['poses'].append(np.median(session['samples'], axis=0).astype(np.float32))
+                            session['step'] += 1
+                            session['start'] = now
+                            session['samples'] = []
+                            if session['step'] == 4:
+                                neutral = session['poses'][0]
+                                puppet.expression.calibrate(*session['poses'])
+                                puppet.smoothed = None
+                                head.reset()
+                                mouth.reset()
+                                body.reset()
+                                expression_session = None
+                                print('Expression calibration complete. Speak naturally.', flush=True)
+                            else:
+                                print(f'Expression calibration: {prompts[session["step"]]} (3 seconds)', flush=True)
+                        continue
+
+                    if neutral is None:
+                        calibration.append(current)
+                        if len(calibration) >= 12:
+                            neutral = np.median(calibration, axis=0).astype(np.float32)
+                            print('Calibrated. Speak naturally.', flush=True)
+                            report = time.monotonic()
+                            render_count = 0
+                            total_track = 0.0
+                            total_render = 0.0
+                            capture_baseline = sequence
+                        continue
+
+                    t_render_start = time.perf_counter()
+                    output = compose(current, frame if live_mouth else None)
+                    t_finished = time.perf_counter()
+
+                    render_count += 1
+                    total_track += (t_tracked - t_track_start)
+                    total_render += (t_finished - t_render_start)
+
+                    if now - report >= 5.0:
+                        dt_span = now - report
+                        render_fps = render_count / dt_span
+                        cam_fps = (sequence - capture_baseline) / dt_span if capture_baseline else render_fps
+                        avg_track_ms = 1000.0 * total_track / max(1, render_count)
+                        avg_render_ms = 1000.0 * total_render / max(1, render_count)
+                        print(f'Render {render_fps:.1f} FPS | Camera {cam_fps:.1f} FPS | Track {avg_track_ms:.1f}ms | Warp {avg_render_ms:.1f}ms', flush=True)
+                        report = now
                         render_count = 0
                         total_track = 0.0
                         total_render = 0.0
                         capture_baseline = sequence
-                    continue
-
-                t_render_start = time.perf_counter()
-                target = puppet.target(current, neutral, args.strength, args.brow_strength)
-                output = puppet.render(target)
-                if live_mouth:
-                    output = mouth.render(output, frame, current, target)
-                output = overlay(output, glasses)
-                output = head.render(output, current, neutral, args.head_motion)
-                output = body.render(output, head.last_alpha, head.state, args.body_motion)
-                t_finished = time.perf_counter()
-
-                render_count += 1
-                total_track += (t_tracked - t_track_start)
-                total_render += (t_finished - t_render_start)
-
-                if now - report >= 5.0:
-                    dt_span = now - report
-                    render_fps = render_count / dt_span
-                    cam_fps = (sequence - capture_baseline) / dt_span if capture_baseline else render_fps
-                    avg_track_ms = 1000.0 * total_track / max(1, render_count)
-                    avg_render_ms = 1000.0 * total_render / max(1, render_count)
-                    print(f'Render {render_fps:.1f} FPS | Camera {cam_fps:.1f} FPS | Track {avg_track_ms:.1f}ms | Warp {avg_render_ms:.1f}ms', flush=True)
-                    report = now
-                    render_count = 0
-                    total_track = 0.0
-                    total_render = 0.0
-                    capture_baseline = sequence
+                except Exception as exc:  # One bad frame must never take the feed down.
+                    if now - last_fault >= 5.0:
+                        last_fault = now
+                        print(f'Skipped a frame: {exc!r}', flush=True)
     finally:
         if audio_stream is not None:
             audio_stream.stop()

@@ -2,31 +2,40 @@
 import cv2
 import numpy as np
 import time
-from puppet import canonical
+from layers import jaw_boundary
+from puppet import canonical, rig_scale
 
 class HeadMotion:
     def __init__(self, image, points, alpha, background):
         self.image = image
         h, w = image.shape[:2]
-        self.scale = w / 960.0
+        self.scale = rig_scale(points)
         self.alpha = alpha.astype(np.float32)
         self.background = background.copy()
-        self.x0 = int(285 * self.scale)
-        self.y0 = 0
-        self.x1 = int(650 * self.scale)
-        self.y1 = min(h, int(400 * self.scale))
+
+        # Work region: the head layer plus room for it to move.
+        ys, xs = np.where(self.alpha > 0.01)
+        pad = int(40 * self.scale)
+        self.x0 = max(0, int(xs.min()) - pad)
+        self.y0 = max(0, int(ys.min()) - pad)
+        self.x1 = min(w, int(xs.max()) + pad + 1)
+        self.y1 = min(h, int(ys.max()) + pad + 1)
         yy, xx = np.mgrid[self.y0:self.y1, self.x0:self.x1].astype(np.float32)
         self.xx = xx
         self.yy = yy
-        self.cx = 465.0 * self.scale
-        self.cy = 185.0 * self.scale
-        self.rx = 117.0 * self.scale
-        self.ry = 181.0 * self.scale
+
+        # Head ellipsoid, placed from the face (proportions in eye-spans).
+        eyes = (points[33] + points[263]) / 2.0
+        span = canonical(points)[3]
+        self.cx = float(eyes[0])
+        self.cy = float(eyes[1]) + 0.058 * span
+        self.rx = 1.016 * span
+        self.ry = 1.572 * span
+        self.nose_y = float(points[1, 1]) - 0.113 * span
         self.chin = float(points[152, 1])
-        chin_x = float(points[152, 0])
 
         # Synchronize rotation mobility with anatomical jawline
-        dy = self.yy - (self.chin - (0.0113 / self.scale) * (self.xx - chin_x)**2)
+        dy = self.yy - jaw_boundary(points, self.xx, self.scale)
         t_mob = np.clip(np.maximum(0.0, dy) / (24.0 * self.scale), 0.0, 1.0)
         self.mobility = np.where(dy <= 0, 1.0, (1.0 - t_mob**2)**2).astype(np.float32)
 
@@ -61,7 +70,7 @@ class HeadMotion:
 
     def depth(self, x, y):
         q = np.maximum(0, 1 - ((x - self.cx) / self.rx)**2 - ((y - self.cy) / self.ry)**2)
-        nose = np.exp(-((x - self.cx) / (19 * self.scale))**2 - ((y - 220 * self.scale) / (40 * self.scale))**2)
+        nose = np.exp(-((x - self.cx) / (19 * self.scale))**2 - ((y - self.nose_y) / (40 * self.scale))**2)
         return 65 * self.scale * np.sqrt(q) + 18 * self.scale * nose
 
     def render(self, image, current, neutral, amount=1.0):

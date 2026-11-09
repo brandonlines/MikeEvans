@@ -1,9 +1,8 @@
-# Mike Evans V11 Fresh — separate skin and glasses
+# Mike Evans V11 Fresh
 
-Fresh standalone package based on the uploaded V9 and repaired V10 renderer.
-The head artwork has been edited to remove baked-in glasses. Eyebrows/eyelids and
-wrinkle shading act on the glasses-free portrait, then separate frames are added.
-The previous eye-freeze/protection patches are NOT present in this installation.
+A webcam-driven photo puppet of Mike Evans, the fictional character from
+*The Three-Body Problem*. The portrait and room are built from the two photos in
+`assets/source/`.
 
 ## Install
 Extract into Downloads, then:
@@ -18,28 +17,39 @@ Wait for SETUP PASSED, then:
 No earlier folders needed. Setup installs Python/dependencies and downloads the
 verified tracking model. Keep the folder in place after installation.
 
-Look for Mike Evans V11 Fresh at startup. Press C to calibrate expressions, following
-the prompts. R recenters, M toggles live mouth, P pauses, Q quits. OBS still captures
-Mike Evans Layered - Live. Your microphone goes directly to Zoom. As in your V9,
-the app also tries local microphone energy input for audio-reactive movement.
+## Using it on Zoom
+The app opens two windows:
 
-## Compare without glasses
-Quit and run:
+- **Mike Evans Layered - Live** is the clean feed. It never shows text or prompts.
+  In OBS, add a macOS Screen Capture source set to this window (crop the title bar
+  if it shows), then Start Virtual Camera. In Zoom, choose OBS Virtual Camera.
+- **Mike Evans Layered - Operator** is for you: a small preview with status and
+  calibration prompts. Do not capture this one.
 
-    bash 02_Start_Layered.command --no-glasses
+Click either window to use the keys: C calibrates expressions (follow the prompts,
+best done before going on air), R recenters, M toggles live mouth, P freezes the
+picture, Q quits. Your microphone goes directly to Zoom. The app also listens to
+mic level locally, only to keep the jaw moving while your face is out of view.
 
-This hides ONLY the separate glasses overlay. It is useful for checking that the
-underlying portrait has no second set of frames. Restart normally to restore them.
+Do not minimize the Live window during a call. The app keeps running, but OBS cannot
+capture a minimized window.
+
+If your face leaves the frame, the avatar holds its last pose and eases back to
+neutral after a second. If the camera drops out, the picture holds while the app
+reconnects, and the Operator window tells you.
+
+## Changing the photos
+Replace `assets/source/cutout.webp` (the person on transparency) and
+`assets/source/scene.webp` (same framing, in the room). They must be pixel-aligned.
+Then run:
+
+    .venv/bin/python build_assets.py
 
 ## Scope and limits
-Head/torso/neck/mouth code and assets otherwise follow V10. The glasses remain
-independent of brow expression; head pose still transforms the assembled head.
-This is not a full 3D glasses model. Reconstructed eye-area details may differ from
-the original, and wide turns/blinks or neck texture differences can show artifacts.
-The app cannot access newer local changes beyond the V9 ZIP you uploaded.
+This is a 2.5D photo puppet, not a 3D model. Head turns are deliberately small, and
+wide turns stop at the limit. The glasses are part of the photo and move with the
+head. The room behind him is reconstructed, so a little smearing can show beside the
+head at the far end of its movement.
 
-Validation: source portrait visually checked for removed glasses; actual model and
-asset alignment exercised; brow extremes tested with stationary frame geometry before pose
-and frame-core colour differences bounded by overlay transparency; separate no-glasses mode and startup tested. Live M3 appearance/FPS
-still need testing. Existing calibration banners appear in OBS, so calibrate before
-presenting.
+Live appearance with a real face, the real mouth insert, and the OBS-to-Zoom path
+still need a rehearsal on the machine you will present from.

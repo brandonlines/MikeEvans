@@ -1,16 +1,23 @@
-# V11 asset provenance
+# Asset provenance
 
-The supplied V9/V10 head asset contained baked-in glasses. V11 replaces it with an
-AI-edited transparent portrait with those glasses removed and the eyes, brows and
-nose bridge reconstructed. The edit requested preservation of identity, pose,
-hair, beard, neck, jacket, plaque, composition and transparency. Generated details
-can differ slightly from the input. Runtime landmark alignment corrects scale and
-position before compositing.
+Mike Evans is a fictional character from *The Three-Body Problem*.
 
-The separate glasses.png frame overlay and remaining scene assets are inherited
-from the uploaded V9/V10 package. Expressions deform the glasses-free skin first;
-the frame overlay is then composited, before shared head pose is applied.
+`assets/source/` holds the two supplied photos:
 
-The generated source retains torso pixels, but layers.py restricts its visible
-alpha to the head and tapered neck. This is a 2.5D photo puppet, not a complete
-3D head or frame model.
+- `cutout.webp`: the person on a transparent background. Only its transparency is
+  used. Its colors carry a stray black mark on the glasses bridge.
+- `scene.webp`: the same framing in the room. Every visible pixel comes from this.
+
+`build_assets.py` crops both to 16:9 and generates the runtime layers:
+
+- `mike-evans.png`: the scene, used to locate the face.
+- `assets/head.png`: scene colors with the cutout's transparency. `layers.py`
+  restricts its visible area to the head and a tapered neck at startup.
+- `assets/background.png`: the scene with the head removed and the neck kept.
+- `assets/empty_room.png`: the room with the person removed. Only a narrow band
+  around the person's outline is ever seen, so deep inside that area it is just a
+  smooth fill.
+- `assets/torso_mask.png`: which pixels of the background plate move with the body.
+
+The glasses are part of the photos, so there is no separate glasses layer. Eyebrow
+and blink motion is kept away from the rims in `puppet.py`.
